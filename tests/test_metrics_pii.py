@@ -40,6 +40,32 @@ def test_redactor_removes_pii_and_keeps_invalid_numbers():
     assert mapping["<PESEL_1>"] == "44051401359"
 
 
+def test_redactor_multi_call_shared_mapping():
+    r = Redactor(["Jan Kowalski", "Anna Nowak"])
+    # First call: Jan Kowalski
+    out1, m1 = r.redact("Account 1 belongs to Jan Kowalski.")
+    assert "<NAME_1>" in out1
+    assert m1["<NAME_1>"] == "Jan Kowalski"
+
+    # Second call: Anna Nowak (must get <NAME_2>, not restart at <NAME_1>)
+    out2, m2 = r.redact("Account 2 belongs to Anna Nowak.")
+    assert "<NAME_2>" in out2
+    assert "<NAME_1>" not in out2
+    assert m2["<NAME_2>"] == "Anna Nowak"
+
+    # Third call: Jan Kowalski again (must reuse <NAME_1>)
+    out3, m3 = r.redact("Counterparty was Jan Kowalski.")
+    assert "<NAME_1>" in out3
+    assert "<NAME_2>" not in out3
+    assert "<NAME_3>" not in out3
+
+    # Reset clears mappings
+    r.reset()
+    out4, m4 = r.redact("New alert for Anna Nowak.")
+    assert "<NAME_1>" in out4
+    assert m4["<NAME_1>"] == "Anna Nowak"
+
+
 def test_budget_and_threshold_metrics():
     y = np.array([0, 0, 1, 0, 1, 0, 0, 0, 0, 1])
     p = np.array([.1, .2, .9, .3, .8, .1, .2, .3, .1, .4])

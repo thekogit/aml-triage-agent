@@ -74,6 +74,7 @@ def attach_patterns(tx: pd.DataFrame, patterns: pd.DataFrame) -> pd.DataFrame:
     p = patterns.drop_duplicates(subset=PATTERN_KEY)
     out = tx.merge(p, on=PATTERN_KEY, how="left")
     out["pattern"] = out["pattern"].fillna("NONE")
+    out.loc[out["is_laundering"] == 0, "pattern"] = "NONE"
     out.loc[(out["is_laundering"] == 1) & (out["pattern"] == "NONE"), "pattern"] = "UNCLASSIFIED"
     return out
 

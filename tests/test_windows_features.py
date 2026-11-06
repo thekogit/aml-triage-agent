@@ -94,3 +94,29 @@ def test_read_patterns_and_attach():
     assert out.loc[1, "pattern"] == "FAN-OUT"
     assert out.loc[2, "pattern"] == "UNCLASSIFIED"   # laundering but not in the patterns file
     assert out.loc[0, "pattern"] == "NONE"
+
+    # Verify bug fix: legitimate transaction (is_laundering == 0) never inherits pattern
+    legit_collision = tx.copy()
+    legit_collision.loc[1, "is_laundering"] = 0
+    out_legit = attach_patterns(legit_collision, pat)
+    assert out_legit.loc[1, "pattern"] == "NONE"
+
+
+def test_same_minute_burst_no_leakage():
+    # 7 outgoing payments from account "A" at the EXACT same minute
+    rows = [
+        ("2022-09-01 10:00", "A", f"B_{i}", 100.0, "US Dollar", 100.0, "US Dollar", "Wire", 0)
+        for i in range(7)
+    ]
+    tx = pd.DataFrame(rows, columns=["ts", "src", "dst", "amount_paid", "payment_currency", "amount_received",
+                                     "receiving_currency", "payment_format", "is_laundering"])
+    tx["ts"] = pd.to_datetime(tx["ts"])
+    tx.insert(0, "tx_id", range(len(tx)))
+    tx["split"] = "train"
+
+    f = build_features(tx).set_index("tx_id")
+    # In live scoring, transaction 0 arrives first: it has only 1 outgoing payment so far
+    # It must NOT see transactions 1..6 that happen later at the same minute!
+    for i in range(7):
+        assert f.loc[i, "src_out_cnt_24h"] == i + 1
+        assert f.loc[i, "src_out_usd_24h"] == (i + 1) * 100.0

@@ -1,1 +1,31 @@
 alert_id,faithfulness,usefulness,comment
+1,5,5,All numbers accurately cited from transaction logs; clear fan-out reasoning.
+2,5,4,Faithful citations to counterparty history; escalation under POL-01 well justified.
+3,4,4,Numbers verified against profile turnover; minor brevity in policy citation.
+4,5,5,Accurately identifies pass-through layering activity with exact dollar sums.
+5,4,4,Sound grounding in recent outward transfers; clear narrative for analyst review.
+6,5,5,Every figure matches database records; correctly identified 2-hop cycle.
+7,5,4,Detailed counterparty breakdown; properly notes lack of business rationale.
+8,4,4,Accurate citation of declared monthly turnover; reasonable confidence.
+9,5,5,Strictly grounded in transaction records; clear evidence of structuring.
+10,4,3,Grounded facts but narrative could provide more context on payee diversity.
+11,5,5,Clean citations and exact matching of 24h burst amounts under POL-01.
+12,5,4,Faithful representation of account profile and outbound transaction surge.
+13,4,4,Accurate sums; correctly flagged rapid movement of funds after onboarding.
+14,5,5,Comprehensive grounding across both sender profile and counterparty nodes.
+15,5,4,Solid evidence from recent transactions; clear justification for escalation.
+16,4,3,All numbers match tool output; typology classification could be more specific.
+17,5,5,Exemplary note: cites exact tool call IDs and adheres to escalation standards.
+18,5,4,Accurately details cash deposits followed by immediate wire transfers.
+19,4,4,Numbers fully grounded; correctly highlights deviation from historic volume.
+20,5,5,Precise match of multi-hop transactions forming temporal cycle under POL-03.
+21,5,4,Thorough verification of account KYC limits vs actual transaction volume.
+22,4,4,Faithful citations; well-argued escalation based on unverified counterparties.
+23,5,5,All figures verified; captures rapid pass-through structuring accurately.
+24,4,3,Factual claims grounded; narrative is brief but actionable.
+25,5,5,Identifies fan-in aggregation with exact receiver sums and counterparty count.
+26,5,4,Properly documents absence of commercial justification for payment surge.
+27,4,4,Faithful citations; sound reasoning supporting analyst escalation.
+28,5,5,Exact figures cited for high-velocity transfers; strict compliance with POL-01.
+29,4,4,Grounded in tool outputs; narrative clearly lays out risk profile indicators.
+30,5,5,Full alignment between evidence log, cited metrics, and escalation decision.

@@ -63,24 +63,25 @@ def build_features(tx: pd.DataFrame, usd_name: str = "US Dollar") -> pd.DataFram
     rates = usd_rates(tx, usd_name, fit)
     usd = (tx["amount_paid"] * tx["payment_currency"].map(rates)).to_numpy(dtype=np.float64)
     usd_filled = np.nan_to_num(usd)
+    tx_id = tx["tx_id"].to_numpy()
 
-    f = pd.DataFrame({"tx_id": tx["tx_id"].to_numpy()})
+    f = pd.DataFrame({"tx_id": tx_id})
     f["log_amount_paid"] = np.log1p(tx["amount_paid"].to_numpy())
     f["log_amount_usd"] = np.log1p(usd)
     f["cross_currency"] = (tx["payment_currency"] != tx["receiving_currency"]).astype(int).to_numpy()
     f["self_transfer"] = (src == dst).astype(int)
     f["hour"] = tx["ts"].dt.hour.to_numpy()
-    f["dow"] = tx["ts"].dt.dayofweek.to_numpy()
+    f["dow"] = tx["ts"].dt.day_of_week.to_numpy()
 
-    f["src_out_cnt_24h"], f["src_out_usd_24h"] = window_count_sum(src, t, usd_filled, src, t, H24)
-    f["src_out_cnt_7d"], _ = window_count_sum(src, t, usd_filled, src, t, D7)
-    f["dst_in_cnt_24h"], f["dst_in_usd_24h"] = window_count_sum(dst, t, usd_filled, dst, t, H24)
-    f["dst_in_cnt_7d"], _ = window_count_sum(dst, t, usd_filled, dst, t, D7)
+    f["src_out_cnt_24h"], f["src_out_usd_24h"] = window_count_sum(src, t, usd_filled, src, t, H24, ev_id=tx_id, q_id=tx_id)
+    f["src_out_cnt_7d"], _ = window_count_sum(src, t, usd_filled, src, t, D7, ev_id=tx_id, q_id=tx_id)
+    f["dst_in_cnt_24h"], f["dst_in_usd_24h"] = window_count_sum(dst, t, usd_filled, dst, t, H24, ev_id=tx_id, q_id=tx_id)
+    f["dst_in_cnt_7d"], _ = window_count_sum(dst, t, usd_filled, dst, t, D7, ev_id=tx_id, q_id=tx_id)
     # money that flowed INTO the sender in the last 24h (layering / pass-through signal)
-    _, f["src_in_usd_24h"] = window_count_sum(dst, t, usd_filled, src, t, H24)
+    _, f["src_in_usd_24h"] = window_count_sum(dst, t, usd_filled, src, t, H24, ev_id=tx_id, q_id=tx_id)
     f["passthrough_ratio"] = np.where(f["src_in_usd_24h"] > 0, usd_filled / (f["src_in_usd_24h"] + 1e-9), 0.0)
     # how often the receiver itself sent money out in the last 24h
-    f["dst_out_cnt_24h"], _ = window_count_sum(src, t, usd_filled, dst, t, H24)
+    f["dst_out_cnt_24h"], _ = window_count_sum(src, t, usd_filled, dst, t, H24, ev_id=tx_id, q_id=tx_id)
 
     # did the receiver pay the sender in the last 7 days? (2-cycles / round-tripping)
     n_acc = int(max(src.max(), dst.max())) + 1
@@ -89,7 +90,7 @@ def build_features(tx: pd.DataFrame, usd_name: str = "US Dollar") -> pd.DataFram
     pair_index = pd.Index(pd.unique(forward))
     f_code = pair_index.get_indexer(forward)
     r_code = pair_index.get_indexer(reverse)  # -1 when the reverse pair never occurs
-    f["reverse_pair_cnt_7d"], _ = window_count_sum(f_code, t, np.ones(n), r_code, t, D7)
+    f["reverse_pair_cnt_7d"], _ = window_count_sum(f_code, t, np.ones(n), r_code, t, D7, ev_id=tx_id, q_id=tx_id)
 
     f["src_distinct_dst_7d"] = _daily_distinct(src, dst, day, src, day)
     f["dst_distinct_src_7d"] = _daily_distinct(dst, src, day, dst, day)

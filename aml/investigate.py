@@ -110,6 +110,7 @@ def recent_transactions(repo: Repo, account: str, center: datetime, hours_before
         "n_in": int(len(inc)), "usd_in": _usd(inc["amount_usd"].sum()),
         "distinct_payees": int(out["dst"].nunique()), "distinct_payers": int(inc["src"].nunique()),
         "transactions": rows, "truncated": bool(len(df) > limit),
+        "fetch_capped": bool(len(df) >= 5000),
     }
 
 
@@ -125,7 +126,7 @@ def counterparties(repo: Repo, account: str, center: datetime, hours: int = 72) 
     payees, n_payees = top(df[df["src"] == account], "dst")
     payers, n_payers = top(df[df["dst"] == account], "src")
     return {"account": account, "window_hours": hours, "payees": payees, "payers": payers,
-            "n_payees": n_payees, "n_payers": n_payers}
+            "n_payees": n_payees, "n_payers": n_payers, "fetch_capped": bool(len(df) >= 20000)}
 
 
 def _temporal_cycles(edges: pd.DataFrame, account: str, max_len: int) -> tuple[list[dict], int, bool]:
@@ -210,8 +211,9 @@ def find_cycles(repo: Repo, account: str, center: datetime, hours: int = 168, ma
     neighbours = sorted(set(first["src"]) | set(first["dst"]) | {account})
     edges = repo.transactions(neighbours, start, end, 200_000)
     cycles, n_found, truncated = _temporal_cycles(edges, account, max_len)
+    fetch_capped = bool(len(first) >= 20_000 or len(edges) >= 200_000)
     return {"account": account, "window_hours": hours, "max_len": max_len, "cycles": cycles,
-            "n_cycles_found": n_found, "search_truncated": truncated}
+            "n_cycles_found": n_found, "search_truncated": truncated, "fetch_capped": fetch_capped}
 
 
 def search_policy(repo: Repo, query: str, k: int = 3) -> dict:

@@ -1,15 +1,15 @@
 """Train the transaction-monitoring model, compare it with rules, and create alerts with reasons."""
 from __future__ import annotations
 
-import json  # noqa: F401  (used once stubs are implemented)
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from . import config  # noqa: F401
-from .features import CATEGORICAL, FEATURES  # noqa: F401
-from .metrics import best_f1_threshold, reliability_table, summary  # noqa: F401
+from . import config
+from .features import CATEGORICAL, FEATURES
+from .metrics import best_f1_threshold, reliability_table, summary
 
 
 def rules_score(feat: pd.DataFrame) -> np.ndarray:
@@ -42,49 +42,107 @@ def to_matrix(feat: pd.DataFrame, categories: dict[str, list[str]]) -> pd.DataFr
     """feat[FEATURES] copy with CATEGORICAL columns cast to pd.Categorical(categories=categories[col]).
 
     Unseen categories -> NaN (LightGBM treats as missing). Column order MUST equal FEATURES.
-    # TODO(builder): X = feat[FEATURES].copy(); for col in CATEGORICAL: X[col] = pd.Categorical(X[col],
-    #   categories=categories[col]); return X
     """
-    raise NotImplementedError
+    X = feat[FEATURES].copy()
+    for col in CATEGORICAL:
+        X[col] = pd.Categorical(X[col], categories=categories[col])
+    return X
 
 
 def train(feat: pd.DataFrame, seed: int = 7):
-    """Fit LightGBM on split=='train', early-stop on split=='val'. Returns (clf, categories).
+    """Fit LightGBM on split=='train', early-stop on split=='val'. Returns (clf, categories)."""
+    import lightgbm as lgb
 
-    categories = {c: sorted(train[c].astype(str).unique())} for c in CATEGORICAL.
-    lib: lgb.LGBMClassifier(n_estimators=3000, learning_rate=0.03, num_leaves=63, min_child_samples=50,
-         subsample=0.8, subsample_freq=1, colsample_bytree=0.8, random_state=seed, verbose=-1)
-         .fit(X_tr, y_tr, eval_set=[(X_va, y_va)], eval_metric="average_precision",
-              callbacks=[lgb.early_stopping(200), lgb.log_evaluation(100)])
-    # TODO(builder): `import lightgbm as lgb` INSIDE the function (CI has no lightgbm). Label column is
-    #   is_laundering. Never pass split/pattern/is_laundering/amount_usd as features (only FEATURES).
-    """
-    raise NotImplementedError
+    tr, va = feat[feat["split"] == "train"], feat[feat["split"] == "val"]
+    categories = {c: sorted(tr[c].astype(str).unique().tolist()) for c in CATEGORICAL}
+    clf = lgb.LGBMClassifier(
+        n_estimators=3000,
+        learning_rate=0.03,
+        num_leaves=63,
+        min_child_samples=50,
+        subsample=0.8,
+        subsample_freq=1,
+        colsample_bytree=0.8,
+        random_state=seed,
+        verbose=-1,
+    )
+    clf.fit(
+        to_matrix(tr, categories),
+        tr["is_laundering"],
+        eval_set=[(to_matrix(va, categories), va["is_laundering"])],
+        eval_metric="average_precision",
+        callbacks=[lgb.early_stopping(200), lgb.log_evaluation(100)],
+    )
+    return clf, categories
 
 
 def evaluate_and_alert(feat: pd.DataFrame, clf, categories: dict) -> dict:
-    """Returns {"report", "alerts", "truth", "scores", "reliability"}.
+    """Returns {"report", "alerts", "truth", "scores", "reliability"}."""
+    va, te = feat[feat["split"] == "val"], feat[feat["split"] == "test"].reset_index(drop=True)
+    p_val = clf.predict_proba(to_matrix(va, categories))[:, 1]
+    thr = best_f1_threshold(va["is_laundering"].to_numpy(), p_val)
+    X_te = to_matrix(te, categories)
+    p_te = clf.predict_proba(X_te)[:, 1]
+    y_te = te["is_laundering"].to_numpy()
 
-    report = {"model_test": summary(y_te, p_te, thr, ALERT_BUDGET),
-              "rules_test": summary(y_te, rules_score(te), np.inf, ALERT_BUDGET),
-              "val_threshold": thr (best_f1_threshold on VAL only), "best_iteration": int}
-    alerts (k = report["model_test"]["alerts"] rows, by score desc, stable):
-        alert_id 1..k, tx_id, score, score_rank 1..k, score_rank_pct = score_rank/len(te),
-        reasons = json.dumps(top_reasons(contrib_row, X_te.iloc[i]), ensure_ascii=False)
-        where contrib = clf.booster_.predict(X_te.iloc[top], pred_contrib=True)[:, :-1]
-    truth  = te.iloc[top][["tx_id", "is_laundering"(, "pattern")]]  (evaluation only, separate file)
-    scores = DataFrame(tx_id, score, is_laundering) over all test rows; reliability = reliability_table(y_te, p_te)
-    # TODO(builder): te = feat[split=="test"].reset_index(drop=True); order = np.argsort(-p_te, kind="stable");
-    #   alerts frame MUST NOT contain is_laundering or pattern columns.
-    """
-    raise NotImplementedError
+    # Rules baseline evaluated at its best validation F1 threshold rather than np.inf
+    r_val = rules_score(va)
+    r_thr = best_f1_threshold(va["is_laundering"].to_numpy(), r_val)
+    r_te = rules_score(te)
+
+    report = {
+        "model_test": summary(y_te, p_te, thr, config.ALERT_BUDGET),
+        "rules_test": summary(y_te, r_te, r_thr, config.ALERT_BUDGET),
+        "val_threshold": thr,
+        "rules_val_threshold": r_thr,
+        "best_iteration": int(getattr(clf, "best_iteration_", None) or clf.n_estimators),
+    }
+
+    k = report["model_test"]["alerts"]
+    order = np.argsort(-p_te, kind="stable")
+    top = order[:k]
+    contrib = clf.booster_.predict(X_te.iloc[top], pred_contrib=True)[:, :-1]
+
+    alerts = te.iloc[top][["tx_id"]].reset_index(drop=True)
+    alerts["score"] = p_te[top]
+    alerts["score_rank"] = np.arange(1, k + 1)
+    alerts["score_rank_pct"] = alerts["score_rank"] / len(te)
+    alerts["reasons"] = [
+        json.dumps(top_reasons(row, X_te.iloc[i]), ensure_ascii=False)
+        for row, i in zip(contrib, top)
+    ]
+    alerts.insert(0, "alert_id", np.arange(1, k + 1))
+
+    truth_cols = ["tx_id", "is_laundering"]
+    if "pattern" in te.columns:
+        truth_cols.append("pattern")
+    truth = te.iloc[top][truth_cols].reset_index(drop=True)
+    truth.insert(0, "alert_id", np.arange(1, k + 1))
+
+    scores = pd.DataFrame({"tx_id": te["tx_id"], "score": p_te, "is_laundering": y_te})
+    return {
+        "report": report,
+        "alerts": alerts,
+        "truth": truth,
+        "scores": scores,
+        "reliability": reliability_table(y_te, p_te),
+    }
 
 
 def save_report(out: dict, results_dir: Path) -> None:
-    """Write results/model_eval.md (markdown table: model | n | positives | pr_auc | f1_at_val_threshold |
-    alerts | precision_at_budget | recall_at_budget; rows "LightGBM", "Rules baseline"; then a line
-    "Validation-chosen threshold: {thr:.4f}") and results/reliability_test.csv.
-    # TODO(builder): build lines by hand (no tabulate dependency); results_dir.mkdir(parents=True, exist_ok=True).
-    """
-    raise NotImplementedError
-
+    """Write results/model_eval.md and results/reliability_test.csv."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"model": name, **vals}
+        for name, vals in [
+            ("LightGBM", out["report"]["model_test"]),
+            ("Rules baseline", out["report"]["rules_test"]),
+        ]
+    ]
+    table = pd.DataFrame(rows)
+    cols = list(table.columns)
+    lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    lines += ["| " + " | ".join(str(v) for v in r) + " |" for r in table.itertuples(index=False)]
+    text = "\n".join(lines) + f"\n\nValidation-chosen threshold: {out['report']['val_threshold']:.4f}\n"
+    (results_dir / "model_eval.md").write_text(text, encoding="utf-8")
+    out["reliability"].to_csv(results_dir / "reliability_test.csv", index=False)

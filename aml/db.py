@@ -3,8 +3,10 @@ PgRepo  -> Repo protocol, connects as SELECT-only role `aml_agent` (cannot see a
 PgStore -> ReviewStore + EvalStore, connects as owner `aml`. The only writers in the online system."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlsplit
 
 import pandas as pd
 
@@ -13,6 +15,14 @@ from .schema import TX_COLUMNS, AlertStatus, Decision, PolicyChunk, TriageRun
 
 AGENT_ACCOUNT_COLUMNS = ["account", "customer_type", "name", "iban", "risk_rating",
                          "declared_monthly_turnover_usd", "onboarding_date", "country"]  # no pesel
+
+
+def _agent_password() -> str:
+    parsed = urlsplit(config.PG_AGENT_DSN)
+    return parsed.password or "aml_agent"
+
+
+_pwd = _agent_password().replace("'", "''")
 
 SCHEMA_SQL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -43,15 +53,30 @@ CREATE TABLE IF NOT EXISTS decisions (
   action TEXT NOT NULL CHECK (action IN ('APPROVE','OVERRIDE_ESCALATE','OVERRIDE_CLOSE')),
   comment TEXT, decided_at TIMESTAMP DEFAULT now(),
   CHECK (action = 'APPROVE' OR length(trim(coalesce(comment, ''))) > 0));
--- audit trail is append-only (TRUNCATE by the loader is still allowed)
-CREATE OR REPLACE RULE assessments_no_update AS ON UPDATE TO assessments DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE assessments_no_delete AS ON DELETE TO assessments DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE decisions_no_update AS ON UPDATE TO decisions DO INSTEAD NOTHING;
-CREATE OR REPLACE RULE decisions_no_delete AS ON DELETE TO decisions DO INSTEAD NOTHING;
+
+-- audit trail is append-only (triggers raise errors on UPDATE/DELETE to prevent silent no-ops)
+CREATE OR REPLACE FUNCTION prevent_audit_modification() RETURNS TRIGGER AS $$
+BEGIN
+  RAISE EXCEPTION 'Table % is append-only: UPDATE and DELETE are prohibited', TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS assessments_no_update_delete ON assessments;
+CREATE TRIGGER assessments_no_update_delete
+BEFORE UPDATE OR DELETE ON assessments
+FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification();
+
+DROP TRIGGER IF EXISTS decisions_no_update_delete ON decisions;
+CREATE TRIGGER decisions_no_update_delete
+BEFORE UPDATE OR DELETE ON decisions
+FOR EACH ROW EXECUTE FUNCTION prevent_audit_modification();
+
 -- least-privilege role for the agent: no alert_truth, no pesel, no writes
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aml_agent') THEN
-    CREATE ROLE aml_agent LOGIN PASSWORD 'aml_agent';
+    CREATE ROLE aml_agent LOGIN PASSWORD '{_pwd}';
+  ELSE
+    ALTER ROLE aml_agent WITH PASSWORD '{_pwd}';
   END IF;
 END $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM aml_agent;
@@ -61,28 +86,32 @@ GRANT SELECT ({", ".join(AGENT_ACCOUNT_COLUMNS)}) ON accounts TO aml_agent;
 
 
 def connect(dsn: str = config.PG_DSN):
-    """psycopg.connect(dsn, autocommit=True, row_factory=dict_row) + pgvector register_vector(conn).
+    """psycopg.connect(dsn, autocommit=True, row_factory=dict_row) + pgvector register_vector(conn)."""
+    import psycopg
+    from pgvector.psycopg import register_vector
+    from psycopg.rows import dict_row
 
-    # TODO(builder): import psycopg / dict_row / pgvector.psycopg.register_vector INSIDE the function
-    #   (CI has no psycopg). Do NOT run CREATE EXTENSION here (agent role lacks rights); init_schema does it.
-    """
-    raise NotImplementedError
+    conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+    try:
+        register_vector(conn)
+    except Exception:
+        pass
+    return conn
 
 
 def init_schema(conn) -> None:
-    """conn.execute(SCHEMA_SQL). Owner connection only. Idempotent.
-    # TODO(builder): one line.
-    """
-    raise NotImplementedError
+    """conn.execute(SCHEMA_SQL). Owner connection only. Idempotent."""
+    conn.execute(SCHEMA_SQL)
 
 
 def copy_frame(conn, table: str, df: pd.DataFrame, columns: list[str]) -> int:
-    """Bulk insert with COPY; NaN/NaT -> None; returns row count.
-    SQL: COPY {table} ({cols}) FROM STDIN  via  cur.copy(...) as cp: cp.write_row(row)
-    # TODO(builder): clean = df[columns].astype(object).where(df[columns].notna(), None);
-    #   numpy scalars -> python via .item() if hasattr(v, "item"). `table` comes from code, never user input.
-    """
-    raise NotImplementedError
+    """Bulk insert with COPY; NaN/NaT -> None; returns row count."""
+    clean = df[columns].astype(object).where(df[columns].notna(), None)
+    with conn.cursor() as cur, cur.copy(f"COPY {table} ({', '.join(columns)}) FROM STDIN") as cp:
+        for row in clean.itertuples(index=False, name=None):
+            py_row = tuple(v.item() if hasattr(v, "item") and callable(v.item) else v for v in row)
+            cp.write_row(py_row)
+    return len(clean)
 
 
 class PgRepo:
@@ -92,33 +121,43 @@ class PgRepo:
         self.conn, self._embedder = conn, embedder
 
     def alert(self, alert_id: int) -> Optional[dict]:
-        """SQL: SELECT a.alert_id, a.score, a.score_rank, a.score_rank_pct, a.reasons::text AS reasons, t.*
-                FROM alerts a JOIN transactions t USING (tx_id) WHERE a.alert_id = %s   -> fetchone() or None
-        # TODO(builder): one execute; parameterised; returns dict_row.
-        """
-        raise NotImplementedError
+        return self.conn.execute(
+            "SELECT a.alert_id, a.score, a.score_rank, a.score_rank_pct, a.reasons::text AS reasons, t.* "
+            "FROM alerts a JOIN transactions t USING (tx_id) WHERE a.alert_id = %s",
+            (alert_id,),
+        ).fetchone()
 
     def profile(self, account: str) -> Optional[dict]:
-        """SQL: SELECT {AGENT_ACCOUNT_COLUMNS} FROM accounts WHERE account = %s  -> fetchone() or None
-        # TODO(builder): explicit column list from AGENT_ACCOUNT_COLUMNS (SELECT * fails: column grant).
-        """
-        raise NotImplementedError
+        cols = ", ".join(AGENT_ACCOUNT_COLUMNS)
+        return self.conn.execute(
+            f"SELECT {cols} FROM accounts WHERE account = %s",
+            (account,),
+        ).fetchone()
 
     def transactions(self, accounts: list[str], start: datetime, end: datetime, limit: int) -> pd.DataFrame:
-        """SQL: SELECT {TX_COLUMNS} FROM transactions WHERE (src = ANY(%s) OR dst = ANY(%s))
-                AND ts BETWEEN %s AND %s ORDER BY ts LIMIT %s
-        Returns DataFrame with columns == TX_COLUMNS even when empty.
-        # TODO(builder): pd.DataFrame(rows, columns=TX_COLUMNS); ts stays datetime64.
-        """
-        raise NotImplementedError
+        cols = ", ".join(TX_COLUMNS)
+        rows = self.conn.execute(
+            f"SELECT {cols} FROM transactions WHERE (src = ANY(%s) OR dst = ANY(%s)) "
+            f"AND ts BETWEEN %s AND %s ORDER BY ts LIMIT %s",
+            (accounts, accounts, start, end, limit),
+        ).fetchall()
+        if not rows:
+            return pd.DataFrame(columns=TX_COLUMNS)
+        df = pd.DataFrame(rows, columns=TX_COLUMNS)
+        df["ts"] = pd.to_datetime(df["ts"])
+        return df
 
-    def search_policy(self, query: str, k: int) -> list[PolicyChunk]:
-        """SQL: SELECT doc_id, title, text FROM policy_chunks ORDER BY embedding <=> %s LIMIT %s
-        vec = embedder.encode(query, normalize_embeddings=True); embedder lazily =
-        SentenceTransformer(config.EMBED_MODEL) on first call.
-        # TODO(builder): lazy import sentence_transformers inside the method.
-        """
-        raise NotImplementedError
+    def search_policy(self, query: str, k: int = 3) -> list[PolicyChunk]:
+        if self._embedder is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._embedder = SentenceTransformer(config.EMBED_MODEL)
+        vec = self._embedder.encode(query, normalize_embeddings=True)
+        rows = self.conn.execute(
+            "SELECT doc_id, title, text FROM policy_chunks ORDER BY embedding <=> %s LIMIT %s",
+            (vec, k),
+        ).fetchall()
+        return [{"doc_id": r["doc_id"], "title": r["title"], "text": r["text"]} for r in rows]
 
 
 class PgStore:
@@ -128,44 +167,67 @@ class PgStore:
         self.conn = conn
 
     def list_alerts(self, status: AlertStatus = "OPEN", limit: int = 50) -> list[dict]:
-        """SQL: SELECT a.alert_id, a.score, a.score_rank, a.status, t.ts, t.src, t.dst, t.amount_usd,
-                t.payment_format FROM alerts a JOIN transactions t USING (tx_id)
-                WHERE a.status = %s ORDER BY a.score_rank LIMIT %s
-        # TODO(builder): clamp limit to 1..500.
-        """
-        raise NotImplementedError
+        lim = max(1, min(int(limit), 500))
+        return self.conn.execute(
+            "SELECT a.alert_id, a.score, a.score_rank, a.status, t.ts, t.src, t.dst, t.amount_usd, "
+            "t.payment_format FROM alerts a JOIN transactions t USING (tx_id) "
+            "WHERE a.status = %s ORDER BY a.score_rank LIMIT %s",
+            (status, lim),
+        ).fetchall()
 
     def latest_assessment(self, alert_id: int) -> Optional[dict]:
-        """SQL: SELECT * FROM assessments WHERE alert_id = %s ORDER BY assessment_id DESC LIMIT 1
-        # TODO(builder): fetchone().
-        """
-        raise NotImplementedError
+        return self.conn.execute(
+            "SELECT * FROM assessments WHERE alert_id = %s ORDER BY assessment_id DESC LIMIT 1",
+            (alert_id,),
+        ).fetchone()
 
     def save_assessment(self, run: TriageRun) -> int:
-        """INSERT INTO assessments (alert_id, model, final, llm_raw, guard_reasons, grounding, tool_log,
-           latency_s, cost_usd) VALUES (...) RETURNING assessment_id;
-           then UPDATE alerts SET status = 'TRIAGED' WHERE alert_id = %s AND status = 'OPEN'
-        JSONB values via json.dumps(..., ensure_ascii=False, default=str). Never sets DECIDED.
-        # TODO(builder): wrap both statements in `with self.conn.transaction():`.
-        """
-        raise NotImplementedError
+        with self.conn.transaction():
+            row = self.conn.execute(
+                "INSERT INTO assessments (alert_id, model, final, llm_raw, guard_reasons, grounding, tool_log, "
+                "latency_s, cost_usd) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING assessment_id",
+                (
+                    run["alert_id"],
+                    run["model"],
+                    json.dumps(run["final_assessment"], ensure_ascii=False, default=str),
+                    json.dumps(run["llm_assessment"], ensure_ascii=False, default=str),
+                    json.dumps(run["guard_reasons"], ensure_ascii=False, default=str),
+                    json.dumps(run["grounding"], ensure_ascii=False, default=str),
+                    json.dumps(run["tool_log"], ensure_ascii=False, default=str),
+                    run["latency_s"],
+                    run["cost_usd"],
+                ),
+            ).fetchone()
+            self.conn.execute(
+                "UPDATE alerts SET status = 'TRIAGED' WHERE alert_id = %s AND status = 'OPEN'",
+                (run["alert_id"],),
+            )
+            return row["assessment_id"]
 
     def save_decision(self, alert_id: int, decision: Decision) -> int:
-        """INSERT INTO decisions (alert_id, assessment_id, analyst, action, comment) VALUES (...)
-           RETURNING decision_id; then UPDATE alerts SET status = 'DECIDED' WHERE alert_id = %s
-        The ONLY code path that sets DECIDED. `decision` is already validated (Decision model).
-        # TODO(builder): wrap both statements in `with self.conn.transaction():`.
-        """
-        raise NotImplementedError
+        with self.conn.transaction():
+            latest = self.latest_assessment(alert_id)
+            assessment_id = latest["assessment_id"] if latest else None
+            row = self.conn.execute(
+                "INSERT INTO decisions (alert_id, assessment_id, analyst, action, comment) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING decision_id",
+                (
+                    alert_id,
+                    assessment_id,
+                    decision.analyst,
+                    decision.action,
+                    decision.comment,
+                ),
+            ).fetchone()
+            self.conn.execute(
+                "UPDATE alerts SET status = 'DECIDED' WHERE alert_id = %s",
+                (alert_id,),
+            )
+            return row["decision_id"]
 
     def truth(self) -> pd.DataFrame:
-        """SQL: SELECT alert_id, is_laundering, pattern FROM alert_truth  -> DataFrame (eval only).
-        # TODO(builder): one line.
-        """
-        raise NotImplementedError
+        rows = self.conn.execute("SELECT alert_id, is_laundering, pattern FROM alert_truth").fetchall()
+        return pd.DataFrame(rows)
 
     def set_memo(self, tx_id: int, memo: Optional[str]) -> None:
-        """SQL: UPDATE transactions SET memo = %s WHERE tx_id = %s   (injection test only).
-        # TODO(builder): one line.
-        """
-        raise NotImplementedError
+        self.conn.execute("UPDATE transactions SET memo = %s WHERE tx_id = %s", (memo, tx_id))

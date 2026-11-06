@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+from . import config
 from . import investigate as inv
 from .guard import wrap_untrusted
 from .pii import Redactor
@@ -93,6 +94,17 @@ class ToolBox:
     def execute(self, name: str, args: Any, call_id: str) -> str:
         started = time.perf_counter()
         args = args if isinstance(args, dict) else {}
+        if len(self.log) >= config.MAX_TOOL_CALLS:
+            err = {"error": f"Tool call budget exceeded (max {config.MAX_TOOL_CALLS} calls per alert). Use existing evidence to finalize."}
+            err_text = json.dumps(err)
+            self.log.append({
+                "tool_call_id": str(call_id),
+                "name": str(name),
+                "args": args,
+                "output": err_text,
+                "latency_s": round(time.perf_counter() - started, 3),
+            })
+            return wrap_untrusted(str(name), err_text)
         try:
             result = self._dispatch(name, args)
         except Exception as e:  # a failing tool must not crash the investigation

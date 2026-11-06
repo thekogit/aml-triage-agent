@@ -7,7 +7,7 @@ import json
 from pydantic import ValidationError
 
 from .grounding import grounding_report
-from .guard import apply_guard
+from .guard import apply_guard, wrap_untrusted
 from .schema import JSON_SHAPE, AlertAssessment, JsonLLM, ToolLogEntry, TriageRun
 
 EVIDENCE_CHARS = 2500  # per tool output in the finalize prompt; lower to 1500 under ABN-B-9
@@ -28,7 +28,7 @@ Rules:
 def build_evidence_log(tool_log: list[ToolLogEntry], max_chars: int = EVIDENCE_CHARS) -> str:
     return "\n\n".join(
         f"[{e['tool_call_id']}] {e['name']}({json.dumps(e['args'], ensure_ascii=False, default=str)}) ->\n"
-        f"{e['output'][:max_chars]}"
+        f"{wrap_untrusted(str(e['name']), str(e['output'])[:max_chars])}"
         for e in tool_log
     ) or "(no tool calls were made)"
 
@@ -68,7 +68,7 @@ def postprocess(alert_id: int, score_rank_pct: float, assessment: AlertAssessmen
                 hard_top: float) -> TriageRun:
     """grounding -> guard -> TriageRun. Pure and deterministic."""
     grounding = grounding_report(assessment, tool_log)
-    final, reasons = apply_guard(assessment, score_rank_pct, grounding, hard_top)
+    final, reasons = apply_guard(assessment, score_rank_pct, grounding, hard_top, tool_log=tool_log)
     cost = tokens_in / 1e6 * price_in_per_mtok + tokens_out / 1e6 * price_out_per_mtok
     return {
         "alert_id": int(alert_id), "model": model,

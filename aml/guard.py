@@ -6,7 +6,7 @@ import math
 import re
 from typing import Optional
 
-from .schema import AlertAssessment, GroundingReport
+from .schema import AlertAssessment, GroundingReport, ToolLogEntry
 
 CLOSE_MIN_CONFIDENCE = 0.7
 _TAG_RE = re.compile(r"<\s*(/?)\s*tool_output", re.IGNORECASE)
@@ -14,10 +14,11 @@ _NAME_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def apply_guard(a: AlertAssessment, score_rank_pct: Optional[float], grounding: GroundingReport,
-                hard_top: float) -> tuple[AlertAssessment, list[str]]:
+                hard_top: float, tool_log: Optional[list[ToolLogEntry]] = None) -> tuple[AlertAssessment, list[str]]:
     """Return (possibly flipped assessment, reasons). CLOSE -> ESCALATE if ANY rule fires:
     rank in top `hard_top` or rank unknown/NaN; grounded_rate < 1.0; confidence < 0.7;
-    risk_level HIGH; typology != NONE (a matched typology cannot be closed by the agent)."""
+    risk_level HIGH; typology != NONE (a matched typology cannot be closed by the agent);
+    or get_transactions was never called."""
     reasons: list[str] = []
     if a.recommendation == "CLOSE":
         if score_rank_pct is None or not math.isfinite(score_rank_pct) or score_rank_pct <= hard_top:
@@ -30,6 +31,10 @@ def apply_guard(a: AlertAssessment, score_rank_pct: Optional[float], grounding: 
             reasons.append("risk level HIGH contradicts CLOSE")
         if a.typology != "NONE":
             reasons.append(f"typology {a.typology} matched: closing requires typology NONE")
+        if tool_log is not None:
+            called = {e.get("name") for e in tool_log if isinstance(e, dict)}
+            if "get_transactions" not in called:
+                reasons.append("get_transactions was not called: closing an alert requires checking transactions")
     if reasons:
         a = a.model_copy(update={"recommendation": "ESCALATE"})
     return a, reasons

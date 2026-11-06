@@ -80,6 +80,38 @@ def test_grounding_accepts_real_numbers_and_flags_invented_ones():
     assert rep["grounded_rate"] == 0.0 and len(rep["problems"]) == 2
 
 
+def test_grounding_rejects_timestamp_fragments_and_numberless_facts():
+    # Output contains timestamp 12:45:00
+    log = [{"tool_call_id": "call_1", "args": {"account": "X"},
+            "output": json.dumps({"transactions": [{"ts": "2022-09-09 12:45:00", "amount_usd": 100.0}]})}]
+
+    # Hallucinated "12" and "45" from timestamp must NOT pass grounding
+    hallucinated = assessment(evidence=[{"tool_call_id": "call_1", "fact": "Only 12 payments, none above 45 USD"}])
+    rep = grounding_report(hallucinated, log)
+    assert rep["grounded_rate"] == 0.0
+    assert "numbers not in tool output" in rep["problems"][0]["problem"]
+
+    # Fact with no numbers at all must NOT pass grounding
+    numberless = assessment(evidence=[{"tool_call_id": "call_1", "fact": "Customer activity looks normal"}])
+    rep_num = grounding_report(numberless, log)
+    assert rep_num["grounded_rate"] == 0.0
+    assert "fact contains no verifiable numbers" in rep_num["problems"][0]["problem"]
+
+
+def test_guard_requires_get_transactions_for_close():
+    ok = {"grounded_rate": 1.0}
+    # When get_transactions was called: CLOSE is allowed
+    log_with_tx = [{"name": "get_transactions", "tool_call_id": "c1", "output": "{}"}]
+    a, why = apply_guard(assessment(), score_rank_pct=0.004, grounding=ok, hard_top=0.001, tool_log=log_with_tx)
+    assert a.recommendation == "CLOSE" and why == []
+
+    # When get_transactions was NOT called: CLOSE is flipped to ESCALATE
+    log_no_tx = [{"name": "get_account_profile", "tool_call_id": "c1", "output": "{}"}]
+    a, why = apply_guard(assessment(), score_rank_pct=0.004, grounding=ok, hard_top=0.001, tool_log=log_no_tx)
+    assert a.recommendation == "ESCALATE"
+    assert "get_transactions was not called" in why[0]
+
+
 def test_guard_escalates_when_in_doubt():
     ok = {"grounded_rate": 1.0}
     a, why = apply_guard(assessment(), score_rank_pct=0.004, grounding=ok, hard_top=0.001)

@@ -101,23 +101,31 @@ IBAN_RE = re.compile(r"\bPL\s?\d{2}(?:\s?\d{4}){6}\b")
 
 class Redactor:
     """Replace checksum-valid PESEL, checksum-valid Polish IBANs and known customer names with
-    placeholders <KIND_n>. Numbering is stable within one redact() call. Invalid-checksum numbers
-    are left untouched so amounts/ids survive for grounding. Input must be ensure_ascii=False JSON."""
+    placeholders <KIND_n>. Numbering is stable across redact() calls for the same Redactor instance.
+    Call reset() to clear mappings between alerts.
+    Invalid-checksum numbers are left untouched so amounts/ids survive for grounding.
+    Input must be ensure_ascii=False JSON."""
 
     def __init__(self, known_names: Iterable[str] = ()):
         names = sorted({n for n in known_names if isinstance(n, str) and len(n) >= 3}, key=len, reverse=True)
         self._name_re = (re.compile(r"(?<!\w)(?:" + "|".join(re.escape(n) for n in names) + r")(?!\w)")
                          if names else None)
+        self.mapping: dict[str, str] = {}
+        self.reverse: dict[str, str] = {}
 
-    def redact(self, text: str) -> tuple[str, dict[str, str]]:
-        mapping: dict[str, str] = {}
-        reverse: dict[str, str] = {}
+    def reset(self) -> None:
+        self.mapping.clear()
+        self.reverse.clear()
+
+    def redact(self, text: str, mapping: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
+        target_mapping = self.mapping if mapping is None else mapping
+        reverse = self.reverse if mapping is None else {v: k for k, v in target_mapping.items()}
 
         def sub(kind: str, value: str) -> str:
             if value in reverse:
                 return reverse[value]
-            key = f"<{kind}_{sum(1 for k in mapping if k.startswith('<' + kind + '_')) + 1}>"
-            mapping[key] = value
+            key = f"<{kind}_{sum(1 for k in target_mapping if k.startswith('<' + kind + '_')) + 1}>"
+            target_mapping[key] = value
             reverse[value] = key
             return key
 
@@ -125,4 +133,4 @@ class Redactor:
         text = PESEL_RE.sub(lambda m: sub("PESEL", m.group(0)) if pesel_is_valid(m.group(0)) else m.group(0), text)
         if self._name_re:
             text = self._name_re.sub(lambda m: sub("NAME", m.group(0)), text)
-        return text, mapping
+        return text, dict(target_mapping)
