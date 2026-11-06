@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+data/*
+!data/.gitkeep
+!data/raw/.gitkeep
+models/*
+!models/.gitkeep
+results/agent_runs.jsonl
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
